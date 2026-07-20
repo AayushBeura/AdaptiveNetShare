@@ -98,8 +98,10 @@ class Peer:
         self._on_message: MessageCallback | None = None
         self._on_channel_ready: ChannelReadyCallback | None = None
 
-        # Event fired when the data channel is open and usable
+        # Events
         self.channel_ready = asyncio.Event()
+        self.buffer_low = asyncio.Event()
+        self.buffer_low.set()  # Initially low
 
     # ------------------------------------------------------------------ #
     # Callback registration
@@ -276,11 +278,17 @@ class Peer:
         @channel.on("open")
         def on_open():
             logger.info("Data channel OPEN: %s", channel.label)
+            # Set buffer threshold (e.g. 1MB)
+            channel.bufferedAmountLowThreshold = 1024 * 1024
             self.channel_ready.set()
             if self._on_channel_ready is not None:
                 result = self._on_channel_ready()
                 if asyncio.iscoroutine(result):
                     asyncio.ensure_future(result)
+
+        @channel.on("bufferedamountlow")
+        def on_bufferedamountlow():
+            self.buffer_low.set()
 
         @channel.on("message")
         def on_message(message):
@@ -298,9 +306,21 @@ class Peer:
     # ------------------------------------------------------------------ #
 
     def send(self, data: bytes | str) -> None:
-        """Send data over the open data channel."""
+        """Send data over the open data channel (synchronous, ignores backpressure)."""
         if self._channel is None:
             raise RuntimeError("Data channel not open yet")
+        self._channel.send(data)
+
+    async def send_with_backpressure(self, data: bytes | str) -> None:
+        """Send data, waiting if the underlying send buffer is too full."""
+        if self._channel is None:
+            raise RuntimeError("Data channel not open yet")
+        
+        # If buffer is full, wait until it drains below threshold
+        if self._channel.bufferedAmount > self._channel.bufferedAmountLowThreshold:
+            self.buffer_low.clear()
+            await self.buffer_low.wait()
+            
         self._channel.send(data)
 
     # ------------------------------------------------------------------ #

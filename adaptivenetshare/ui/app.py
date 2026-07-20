@@ -33,6 +33,7 @@ from adaptivenetshare.config import (
     CHUNK_SIZE,
     SIGNALLING_HOST,
     SIGNALLING_PORT,
+    SLIDING_WINDOW_SIZE,
 )
 from adaptivenetshare.core.peer import Peer
 from adaptivenetshare.core.chunker import FileSender, FileReceiver
@@ -160,8 +161,7 @@ class App(ctk.CTk):
 
         # Send-side state
         self._send_manifest_ack: Optional[asyncio.Event] = None
-        self._send_chunk_acks: Dict[int, asyncio.Event] = {}
-        self._send_nack_set: set = set()
+        self._send_ack_queue: Optional[asyncio.Queue] = None
         self._send_done: Optional[asyncio.Event] = None
 
         # Receive-side state
@@ -689,8 +689,7 @@ class App(ctk.CTk):
 
             # Initialise send-side events
             self._send_manifest_ack = asyncio.Event()
-            self._send_chunk_acks = {}
-            self._send_nack_set = set()
+            self._send_ack_queue = asyncio.Queue()
             self._send_done = asyncio.Event()
 
             # Add transfer widget
@@ -704,40 +703,55 @@ class App(ctk.CTk):
             # 2. Wait for manifest ACK
             await asyncio.wait_for(self._send_manifest_ack.wait(), timeout=30)
 
-            # 3. Send chunks
+            # 3. Send chunks with Sliding Window
             start_time = time.time()
             bytes_sent = 0
 
-            for i in range(sender.total_chunks):
-                success = False
-                for attempt in range(3):
-                    event = asyncio.Event()
-                    self._send_chunk_acks[i] = event
-                    self._send_nack_set.discard(i)
+            window_size = SLIDING_WINDOW_SIZE
+            in_flight = set()
+            next_to_send = 0
 
-                    chunk = sender.get_chunk(i)
-                    self.peer.send(serialize(chunk))
+            while next_to_send < sender.total_chunks or in_flight:
+                # 3a. Fill the window
+                while len(in_flight) < window_size and next_to_send < sender.total_chunks:
+                    chunk = sender.get_chunk(next_to_send)
+                    in_flight.add(next_to_send)
+                    await self.peer.send_with_backpressure(serialize(chunk))
+                    next_to_send += 1
 
-                    await asyncio.wait_for(event.wait(), timeout=30)
+                # 3b. Wait for an ACK/NACK
+                try:
+                    status, idx = await asyncio.wait_for(
+                        self._send_ack_queue.get(), timeout=30.0
+                    )
 
-                    if i not in self._send_nack_set:
-                        success = True
-                        break
-                    logger.warning("Chunk %d NACKed, retry %d", i, attempt + 1)
+                    if status == "ACK":
+                        if idx in in_flight:
+                            in_flight.remove(idx)
+                            bytes_sent += sender.chunk_size
+                            
+                            elapsed = time.time() - start_time
+                            speed = bytes_sent / elapsed if elapsed > 0 else 0
+                            remaining = max(0, manifest.file_size - bytes_sent)
+                            eta = remaining / speed if speed > 0 else 0
+                            progress = min(1.0, bytes_sent / manifest.file_size)
 
-                if not success:
-                    raise RuntimeError(f"Chunk {i} failed after 3 retries")
+                            self.after(0, self._update_transfer_widget,
+                                       transfer_id, progress, speed, eta,
+                                       min(int(bytes_sent / sender.chunk_size), sender.total_chunks), 
+                                       sender.total_chunks)
+                                       
+                    elif status == "NACK":
+                        logger.warning("Chunk %d NACKed, retransmitting", idx)
+                        # Retransmit just this chunk
+                        chunk = sender.get_chunk(idx)
+                        await self.peer.send_with_backpressure(serialize(chunk))
 
-                bytes_sent += len(chunk.data)
-                elapsed = time.time() - start_time
-                speed = bytes_sent / elapsed if elapsed > 0 else 0
-                remaining = manifest.file_size - bytes_sent
-                eta = remaining / speed if speed > 0 else 0
-                progress = (i + 1) / sender.total_chunks
-
-                self.after(0, self._update_transfer_widget,
-                           transfer_id, progress, speed, eta,
-                           i + 1, sender.total_chunks)
+                except asyncio.TimeoutError:
+                    logger.warning("Timeout waiting for ACKs. Retransmitting in-flight window.")
+                    for idx in in_flight:
+                        chunk = sender.get_chunk(idx)
+                        await self.peer.send_with_backpressure(serialize(chunk))
 
             # 4. Wait for Done
             await asyncio.wait_for(self._send_done.wait(), timeout=60)
@@ -798,15 +812,12 @@ class App(ctk.CTk):
                 if self._send_manifest_ack:
                     self._send_manifest_ack.set()
             else:
-                event = self._send_chunk_acks.get(msg.chunk_index)
-                if event:
-                    event.set()
+                if self._send_ack_queue:
+                    self._send_ack_queue.put_nowait(("ACK", msg.chunk_index))
 
         elif isinstance(msg, NackMessage):
-            self._send_nack_set.add(msg.chunk_index)
-            event = self._send_chunk_acks.get(msg.chunk_index)
-            if event:
-                event.set()
+            if self._send_ack_queue:
+                self._send_ack_queue.put_nowait(("NACK", msg.chunk_index))
 
         elif isinstance(msg, DoneMessage):
             if self._send_done:
