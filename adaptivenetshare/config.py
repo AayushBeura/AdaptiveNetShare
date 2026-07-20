@@ -30,8 +30,8 @@ TURN_URLS: list[str] = [
     "turn:openrelay.metered.ca:443",
     "turn:openrelay.metered.ca:443?transport=tcp",
 ]
-TURN_USERNAME: str = "openrelayproject"
-TURN_CREDENTIAL: str = "openrelayproject"
+TURN_USERNAME: str = os.environ.get("ANS_TURN_USERNAME", "b15e7638bea94865a4884140")
+TURN_CREDENTIAL: str = os.environ.get("ANS_TURN_CREDENTIAL", "ThSSPf0EYid+7hHh")
 
 # ---------------------------------------------------------------------------
 # File transfer

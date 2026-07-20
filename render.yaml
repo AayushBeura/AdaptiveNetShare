@@ -7,4 +7,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.0"
+      - key: ANS_TURN_USERNAME
+        value: b15e7638bea94865a4884140
+      - key: ANS_TURN_CREDENTIAL
+        value: ThSSPf0EYid+7hHh
     plan: free
