@@ -70,71 +70,56 @@ async def _handler(ws: ServerConnection) -> None:
                     "peer_id": peer_id,
                 }))
 
-            # ----------------------------------------------------------
-            # OFFER / ANSWER / CANDIDATE / HANDSHAKE — forward to the target peer
-            # ----------------------------------------------------------
-            elif msg_type in ("offer", "answer", "candidate", "connection_request", "connection_accepted", "connection_rejected"):
-                target_id = msg.get("target")
-                if not target_id:
-                    await ws.send(json.dumps({
-                        "type": "error",
-                        "message": f"Missing 'target' in {msg_type} message",
-                    }))
-                    continue
-
-                target_ws = _peers.get(target_id)
-                if target_ws is None:
-                    await ws.send(json.dumps({
-                        "type": "error",
-                        "message": f"Peer {target_id!r} not found",
-                    }))
-                    continue
-
-                # Inject the sender's identity so the receiver knows who
-                # sent this message.
-                msg["source"] = peer_id
-                await target_ws.send(json.dumps(msg))
-                logger.debug(
-                    "Forwarded %s from %s → %s", msg_type, peer_id, target_id
-                )
-
-            else:
-                await ws.send(json.dumps({
-                    "type": "error",
-                    "message": f"Unknown message type: {msg_type!r}",
-                }))
-
-    except Exception:
-        logger.exception("Connection error for peer %s", peer_id)
-
+        async for msg in ws:
+            if msg.type == web.WSMsgType.TEXT:
+                data = json.loads(msg.data)
+                msg_type = data.get("type")
+                
+                if msg_type == "register":
+                    peer_id = data.get("peer_id")
+                    if peer_id:
+                        _peers[peer_id] = ws
+                        logger.info("Registered peer %s  (total: %d)", peer_id, len(_peers))
+                        await ws.send_json({"type": "registered"})
+                
+                elif msg_type in ("offer", "answer", "candidate", "connection_request", "connection_accepted", "connection_rejected"):
+                    target = data.get("target")
+                    if target in _peers:
+                        data["source"] = peer_id
+                        await _peers[target].send_json(data)
+                    else:
+                        await ws.send_json({"type": "error", "message": f"Peer {target} not found"})
+                        
+            elif msg.type == web.WSMsgType.ERROR:
+                logger.error('ws connection closed with exception %s', ws.exception())
     finally:
-        # Clean up on disconnect
         if peer_id and peer_id in _peers:
             del _peers[peer_id]
             logger.info("Unregistered peer %s  (total: %d)", peer_id, len(_peers))
+            
+    return ws
 
-
-def process_request(connection: ServerConnection, request) -> Response | None:
-    """Intercept HTTP requests from Render health checks and return 200 OK."""
-    if "Upgrade" not in request.headers:
-        return Response(200, "OK", b"Healthy\n")
-    return None
+async def index_handler(request: web.Request) -> web.StreamResponse:
+    """Handle both HTTP health checks and WebSocket upgrades."""
+    if request.headers.get("Upgrade", "").lower() == "websocket":
+        return await websocket_handler(request)
+    return web.Response(text="Healthy\n", status=200)
 
 async def main() -> None:
     """Start the signalling server."""
     logger.info(
-        "Signalling server starting on ws://%s:%d", SIGNALLING_HOST, SIGNALLING_PORT
+        "Signalling server starting on http://%s:%d", SIGNALLING_HOST, SIGNALLING_PORT
     )
-    async with serve(
-        _handler, 
-        SIGNALLING_HOST, 
-        SIGNALLING_PORT,
-        ping_interval=20,
-        ping_timeout=20,
-        process_request=process_request
-    ) as server:
-        await server.serve_forever()
-
+    app = web.Application()
+    app.router.add_route('*', '/', index_handler)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, SIGNALLING_HOST, SIGNALLING_PORT)
+    await site.start()
+    
+    # Run forever
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     logging.basicConfig(

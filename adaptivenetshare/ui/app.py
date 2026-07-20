@@ -137,6 +137,14 @@ class _AsyncBridge:
 # ║  MAIN APPLICATION                                              ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
+def _get_or_create_peer_id() -> str:
+    peer_id_file = Path.home() / ".adaptivenetshare_peer_id"
+    if peer_id_file.exists():
+        return peer_id_file.read_text().strip()
+    new_id = str(uuid.uuid4())
+    peer_id_file.write_text(new_id)
+    return new_id
+
 class App(ctk.CTk):
     """AdaptiveNetShare desktop application."""
 
@@ -151,7 +159,7 @@ class App(ctk.CTk):
         ctk.set_appearance_mode("dark")
 
         # ── State ─────────────────────────────────────
-        self.peer_id: str = str(uuid.uuid4())
+        self.peer_id: str = _get_or_create_peer_id()
         self.peer: Optional[Peer] = None
         self.connected: bool = False
         self.selected_file: Optional[Path] = None

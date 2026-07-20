@@ -2,7 +2,7 @@ services:
   - type: web
     name: adaptivenetshare-signalling
     runtime: python
-    buildCommand: pip install websockets
+    buildCommand: pip install aiohttp
     startCommand: python -m adaptivenetshare.signalling.server
     envVars:
       - key: PYTHON_VERSION

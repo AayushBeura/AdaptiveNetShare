@@ -3,7 +3,8 @@
 
 # --- Week 1: Core Engine ---
 aiortc>=1.9.0            # Python WebRTC: ICE, STUN/TURN, data channels
-websockets>=13.0         # Signalling server and client
+websockets>=13.0         # Signalling client
+aiohttp>=3.9.0           # Signalling server (handles Render HTTP health checks)
 aiofiles>=24.1.0         # Async file I/O for chunk reads/writes
 msgpack>=1.0.8           # Efficient binary serialization for protocol messages
 
