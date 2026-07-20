@@ -8,9 +8,14 @@ async def main():
     config = RTCConfiguration(
         iceServers=[
             RTCIceServer(
-                urls=["turn:openrelay.metered.ca:80"],
-                username="openrelayproject",
-                credential="openrelayproject",
+                urls=[
+                    "turn:global.relay.metered.ca:80",
+                    "turn:global.relay.metered.ca:80?transport=tcp",
+                    "turn:global.relay.metered.ca:443",
+                    "turns:global.relay.metered.ca:443?transport=tcp"
+                ],
+                username="b15e7638bea94865a4884140",
+                credential="ThSSPf0EYid+7hHh",
             )
         ]
     )

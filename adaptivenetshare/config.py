@@ -25,13 +25,10 @@ STUN_URLS: list[str] = [
     "stun:stun1.l.google.com:19302",
 ]
 
-TURN_URLS: list[str] = [
-    "turn:openrelay.metered.ca:80",
-    "turn:openrelay.metered.ca:443",
-    "turn:openrelay.metered.ca:443?transport=tcp",
-]
-TURN_USERNAME: str = os.environ.get("ANS_TURN_USERNAME", "b15e7638bea94865a4884140")
-TURN_CREDENTIAL: str = os.environ.get("ANS_TURN_CREDENTIAL", "ThSSPf0EYid+7hHh")
+METERED_API_URL: str = os.environ.get(
+    "ANS_METERED_API_URL", 
+    "https://adaptivenetshare.metered.live/api/v1/turn/credentials?apiKey=c7f992909e19de856c993a6b99c6a5fb3c66"
+)
 
 # ---------------------------------------------------------------------------
 # File transfer

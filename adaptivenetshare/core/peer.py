@@ -13,6 +13,7 @@ from ``adaptivenetshare.signalling.server`` for rendezvous.
 from __future__ import annotations
 
 import asyncio
+import aiohttp
 import json
 import logging
 import uuid
@@ -30,9 +31,7 @@ from websockets.asyncio.client import connect as ws_connect
 from adaptivenetshare.config import (
     SIGNALLING_URL,
     STUN_URLS,
-    TURN_URLS,
-    TURN_USERNAME,
-    TURN_CREDENTIAL,
+    METERED_API_URL,
     DATA_CHANNEL_LABEL,
 )
 
@@ -43,17 +42,30 @@ MessageCallback = Callable[[bytes | str], Awaitable[None] | None]
 ChannelReadyCallback = Callable[[], Awaitable[None] | None]
 
 
-def _build_ice_config() -> RTCConfiguration:
-    """Build the RTCConfiguration with Open Relay STUN/TURN servers."""
+async def _build_ice_config() -> RTCConfiguration:
+    """Build the RTCConfiguration by fetching dynamic credentials from Metered."""
     ice_servers = [RTCIceServer(urls=STUN_URLS)]
-    if TURN_URLS:
-        ice_servers.append(
-            RTCIceServer(
-                urls=TURN_URLS,
-                username=TURN_USERNAME,
-                credential=TURN_CREDENTIAL,
-            )
-        )
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(METERED_API_URL, timeout=5.0) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    for s in data:
+                        urls = s.get("urls")
+                        if isinstance(urls, str):
+                            urls = [urls]
+                        ice_servers.append(
+                            RTCIceServer(
+                                urls=urls,
+                                username=s.get("username"),
+                                credential=s.get("credential")
+                            )
+                        )
+                else:
+                    logger.error("Failed to fetch ICE servers, HTTP status %s", response.status)
+    except Exception as e:
+        logger.error("Error fetching ICE servers from REST API: %s", e)
+        
     return RTCConfiguration(iceServers=ice_servers)
 
 
@@ -251,7 +263,7 @@ class Peer:
         if target_id == self.peer_id:
             raise ValueError("Cannot connect to yourself")
 
-        self._pc = RTCPeerConnection(configuration=_build_ice_config())
+        self._pc = RTCPeerConnection(configuration=await _build_ice_config())
         self._setup_pc_events()
 
         # The offerer creates the data channel
@@ -282,7 +294,7 @@ class Peer:
         source_id = msg.get("source", "unknown")
         logger.info("Received SDP offer from %s", source_id)
 
-        self._pc = RTCPeerConnection(configuration=_build_ice_config())
+        self._pc = RTCPeerConnection(configuration=await _build_ice_config())
         self._setup_pc_events()
 
         # Set remote description from the offer
