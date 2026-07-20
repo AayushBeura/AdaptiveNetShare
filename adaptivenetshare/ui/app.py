@@ -160,7 +160,7 @@ class App(ctk.CTk):
         self._local_server = None
 
         # Send-side state
-        self._send_manifest_ack: Optional[asyncio.Event] = None
+        self._send_manifest_ack: Optional[asyncio.Future[bool]] = None
         self._send_ack_queue: Optional[asyncio.Queue] = None
         self._send_done: Optional[asyncio.Event] = None
 
@@ -620,9 +620,7 @@ class App(ctk.CTk):
     async def _disconnect_async(self) -> None:
         """Perform background disconnection."""
         if self.peer:
-            await self.peer.close()
-        # Reconnect signalling to be ready for next connection
-        await self._init_async()
+            await self.peer.disconnect_peer()
 
     def _set_status(self, text: str, color: str = TEXT_DIM) -> None:
         self._status_label.configure(text=text, text_color=color)
@@ -721,7 +719,7 @@ class App(ctk.CTk):
             transfer_id = manifest.transfer_id
 
             # Initialise send-side events
-            self._send_manifest_ack = asyncio.Event()
+            self._send_manifest_ack = self._bridge.loop.create_future()
             self._send_ack_queue = asyncio.Queue()
             self._send_done = asyncio.Event()
 
@@ -733,8 +731,10 @@ class App(ctk.CTk):
             # 1. Send manifest
             self.peer.send(serialize(manifest))
 
-            # 2. Wait for manifest ACK
-            await asyncio.wait_for(self._send_manifest_ack.wait(), timeout=30)
+            # 2. Wait for manifest ACK/NACK
+            approved = await asyncio.wait_for(self._send_manifest_ack, timeout=30)
+            if not approved:
+                raise RuntimeError("Receiver declined the transfer")
 
             # 3. Send chunks with Sliding Window
             start_time = time.time()
@@ -842,15 +842,20 @@ class App(ctk.CTk):
         elif isinstance(msg, AckMessage):
             if msg.chunk_index == -1:
                 # Manifest ACK
-                if self._send_manifest_ack:
-                    self._send_manifest_ack.set()
+                if self._send_manifest_ack and not self._send_manifest_ack.done():
+                    self._send_manifest_ack.set_result(True)
             else:
                 if self._send_ack_queue:
                     self._send_ack_queue.put_nowait(("ACK", msg.chunk_index))
 
         elif isinstance(msg, NackMessage):
-            if self._send_ack_queue:
-                self._send_ack_queue.put_nowait(("NACK", msg.chunk_index))
+            if msg.chunk_index == -1:
+                # Manifest NACK
+                if self._send_manifest_ack and not self._send_manifest_ack.done():
+                    self._send_manifest_ack.set_result(False)
+            else:
+                if self._send_ack_queue:
+                    self._send_ack_queue.put_nowait(("NACK", msg.chunk_index))
 
         elif isinstance(msg, DoneMessage):
             if self._send_done:

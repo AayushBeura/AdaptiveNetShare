@@ -375,6 +375,17 @@ class Peer:
     # Teardown
     # ------------------------------------------------------------------ #
 
+    async def disconnect_peer(self) -> None:
+        """Close only the WebRTC peer connection, keeping the signalling connection alive."""
+        if self._pc is not None:
+            await self._pc.close()
+            self._pc = None
+        self._channel = None
+        self.channel_ready.clear()
+        # Trigger the callback to update UI
+        if self._on_connection_closed is not None:
+            self._on_connection_closed()
+
     async def close(self) -> None:
         """Tear down the peer connection and signalling WebSocket."""
         if self._signalling_task is not None:
