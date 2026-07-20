@@ -329,9 +329,9 @@ class Peer:
         candidate_data = msg.get("candidate")
         if candidate_data:
             candidate = RTCIceCandidate(
-                sdpMid=candidate_data.get("sdpMid"),
-                sdpMLineIndex=candidate_data.get("sdpMLineIndex"),
-                candidate=candidate_data.get("candidate", ""),
+                candidate_data.get("candidate", ""),
+                candidate_data.get("sdpMid"),
+                candidate_data.get("sdpMLineIndex"),
             )
             await self._pc.addIceCandidate(candidate)
             logger.debug("Added ICE candidate")
