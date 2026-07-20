@@ -2,7 +2,7 @@ services:
   - type: web
     name: adaptivenetshare-signalling
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install websockets
     startCommand: python -m adaptivenetshare.signalling.server
     envVars:
       - key: PYTHON_VERSION
