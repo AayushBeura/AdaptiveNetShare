@@ -22,54 +22,21 @@ import json
 import logging
 from typing import Dict
 
-from websockets.asyncio.server import serve, ServerConnection
-from websockets.http11 import Response
+from aiohttp import web
 
 from adaptivenetshare.config import SIGNALLING_HOST, SIGNALLING_PORT
 
 logger = logging.getLogger(__name__)
 
 # Maps peer_id → active WebSocket connection
-_peers: Dict[str, ServerConnection] = {}
+_peers: Dict[str, web.WebSocketResponse] = {}
 
-
-async def _handler(ws: ServerConnection) -> None:
-    """Handle a single WebSocket client connection."""
-
-    peer_id: str | None = None
-
+async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
+    ws = web.WebSocketResponse(heartbeat=20.0)
+    await ws.prepare(request)
+    
+    peer_id = None
     try:
-        async for raw in ws:
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                await ws.send(json.dumps({
-                    "type": "error",
-                    "message": "Invalid JSON",
-                }))
-                continue
-
-            msg_type = msg.get("type")
-
-            # ----------------------------------------------------------
-            # REGISTER — client announces itself
-            # ----------------------------------------------------------
-            if msg_type == "register":
-                peer_id = msg.get("peer_id")
-                if not peer_id:
-                    await ws.send(json.dumps({
-                        "type": "error",
-                        "message": "Missing peer_id in register message",
-                    }))
-                    continue
-
-                _peers[peer_id] = ws
-                logger.info("Registered peer %s  (total: %d)", peer_id, len(_peers))
-                await ws.send(json.dumps({
-                    "type": "registered",
-                    "peer_id": peer_id,
-                }))
-
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
                 data = json.loads(msg.data)
