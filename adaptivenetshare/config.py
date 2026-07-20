@@ -22,6 +22,8 @@ SIGNALLING_URL: str = os.environ.get(
 # https://www.metered.ca/tools/openrelay/
 # ---------------------------------------------------------------------------
 STUN_URLS: list[str] = [
+    "stun:stun.l.google.com:19302",
+    "stun:stun1.l.google.com:19302",
     "stun:openrelay.metered.ca:80",
 ]
 

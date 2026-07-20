@@ -136,7 +136,8 @@ class Peer:
             try:
                 # Render free tier might take ~50s to wake up, so use a longer timeout or retry
                 self._ws = await ws_connect(
-                    self.signalling_url, open_timeout=60.0
+                    self.signalling_url, open_timeout=60.0,
+                    ping_interval=20, ping_timeout=20
                 )
                 break
             except Exception as e:

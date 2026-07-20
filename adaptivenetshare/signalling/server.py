@@ -23,6 +23,7 @@ import logging
 from typing import Dict
 
 from websockets.asyncio.server import serve, ServerConnection
+from websockets.http11 import Response
 
 from adaptivenetshare.config import SIGNALLING_HOST, SIGNALLING_PORT
 
@@ -113,12 +114,25 @@ async def _handler(ws: ServerConnection) -> None:
             logger.info("Unregistered peer %s  (total: %d)", peer_id, len(_peers))
 
 
+def process_request(connection: ServerConnection, request) -> Response | None:
+    """Intercept HTTP requests from Render health checks and return 200 OK."""
+    if "Upgrade" not in request.headers:
+        return Response(200, "OK", b"Healthy\n")
+    return None
+
 async def main() -> None:
     """Start the signalling server."""
     logger.info(
         "Signalling server starting on ws://%s:%d", SIGNALLING_HOST, SIGNALLING_PORT
     )
-    async with serve(_handler, SIGNALLING_HOST, SIGNALLING_PORT) as server:
+    async with serve(
+        _handler, 
+        SIGNALLING_HOST, 
+        SIGNALLING_PORT,
+        ping_interval=20,
+        ping_timeout=20,
+        process_request=process_request
+    ) as server:
         await server.serve_forever()
 
 
