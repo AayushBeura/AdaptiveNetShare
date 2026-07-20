@@ -60,7 +60,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             elif msg.type == web.WSMsgType.ERROR:
                 logger.error('ws connection closed with exception %s', ws.exception())
     finally:
-        if peer_id and peer_id in _peers:
+        if peer_id and _peers.get(peer_id) is ws:
             del _peers[peer_id]
             logger.info("Unregistered peer %s  (total: %d)", peer_id, len(_peers))
             
