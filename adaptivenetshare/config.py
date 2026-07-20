@@ -25,9 +25,13 @@ STUN_URLS: list[str] = [
     "stun:stun1.l.google.com:19302",
 ]
 
-TURN_URLS: list[str] = []
-TURN_USERNAME: str = ""
-TURN_CREDENTIAL: str = ""
+TURN_URLS: list[str] = [
+    "turn:openrelay.metered.ca:80",
+    "turn:openrelay.metered.ca:443",
+    "turn:openrelay.metered.ca:443?transport=tcp",
+]
+TURN_USERNAME: str = "openrelayproject"
+TURN_CREDENTIAL: str = "openrelayproject"
 
 # ---------------------------------------------------------------------------
 # File transfer
