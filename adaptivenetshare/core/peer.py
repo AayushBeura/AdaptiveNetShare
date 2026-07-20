@@ -97,6 +97,7 @@ class Peer:
         # User-registered callbacks
         self._on_message: MessageCallback | None = None
         self._on_channel_ready: ChannelReadyCallback | None = None
+        self._on_connection_closed: Callable[[], None] | None = None
 
         # Events
         self.channel_ready = asyncio.Event()
@@ -114,6 +115,10 @@ class Peer:
     def on_data_channel_ready(self, callback: ChannelReadyCallback) -> None:
         """Register a callback for when the data channel opens."""
         self._on_channel_ready = callback
+
+    def on_connection_closed(self, callback: Callable[[], None]) -> None:
+        """Register a callback for when the connection closes."""
+        self._on_connection_closed = callback
 
     # ------------------------------------------------------------------ #
     # Signalling
@@ -196,6 +201,9 @@ class Peer:
         offer = await self._pc.createOffer()
         await self._pc.setLocalDescription(offer)
 
+        # Wait for ICE gathering to complete to embed candidates in SDP
+        await self._wait_for_ice_gathering()
+
         # Send offer through signalling server
         assert self._ws is not None
         await self._ws.send(json.dumps({
@@ -225,6 +233,9 @@ class Peer:
         answer = await self._pc.createAnswer()
         await self._pc.setLocalDescription(answer)
 
+        # Wait for ICE gathering to complete to embed candidates in SDP
+        await self._wait_for_ice_gathering()
+
         # Send answer back through signalling server
         assert self._ws is not None
         await self._ws.send(json.dumps({
@@ -249,7 +260,7 @@ class Peer:
         logger.info("Set remote description from answer")
 
     async def _handle_candidate(self, msg: dict) -> None:
-        """Handle an incoming ICE candidate."""
+        """Handle an incoming ICE candidate (unused in full-SDP exchange but kept for compatibility)."""
         if self._pc is None:
             logger.warning("Received ICE candidate but no PeerConnection exists")
             return
@@ -263,6 +274,25 @@ class Peer:
             )
             await self._pc.addIceCandidate(candidate)
             logger.debug("Added ICE candidate")
+
+    async def _wait_for_ice_gathering(self) -> None:
+        """Wait for ICE gathering state to complete, or timeout after 3 seconds."""
+        if self._pc is None or self._pc.iceGatheringState == "complete":
+            return
+
+        done = asyncio.Event()
+
+        @self._pc.on("icegatheringstatechange")
+        def on_state_change():
+            if self._pc and self._pc.iceGatheringState == "complete":
+                done.set()
+
+        try:
+            # Most gathering completes in <500ms. We set a 3s timeout to be safe.
+            await asyncio.wait_for(done.wait(), timeout=3.0)
+            logger.info("ICE gathering complete")
+        except asyncio.TimeoutError:
+            logger.warning("ICE gathering timed out, sending partial SDP")
 
     # ------------------------------------------------------------------ #
     # PeerConnection and DataChannel event wiring
@@ -283,8 +313,10 @@ class Peer:
         async def on_connection_state_change():
             state = self._pc.connectionState
             logger.info("Connection state: %s", state)
-            if state == "failed":
+            if state in ("failed", "closed"):
                 await self.close()
+                if self._on_connection_closed is not None:
+                    self._on_connection_closed()
 
     def _setup_channel_events(self, channel) -> None:
         """Wire up events on the data channel."""
@@ -314,6 +346,8 @@ class Peer:
         @channel.on("close")
         def on_close():
             logger.info("Data channel CLOSED")
+            if self._on_connection_closed is not None:
+                self._on_connection_closed()
 
     # ------------------------------------------------------------------ #
     # Sending

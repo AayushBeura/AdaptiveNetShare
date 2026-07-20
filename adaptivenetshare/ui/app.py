@@ -536,6 +536,11 @@ class App(ctk.CTk):
         ))
 
     def _on_connect_click(self) -> None:
+        if self.connected:
+            self._connect_btn.configure(text="Disconnecting...", state="disabled")
+            self._bridge.submit(self._disconnect_async())
+            return
+
         target_id = self._peer_entry.get().strip()
         if not target_id:
             self._connect_status.configure(
@@ -580,7 +585,7 @@ class App(ctk.CTk):
         self._conn_dot.configure(text_color=GREEN)
         self._conn_label.configure(text="Connected", text_color=GREEN)
         self._connect_btn.configure(
-            text="Connected", fg_color=GREEN_DIM, state="disabled",
+            text="Disconnect", fg_color=RED, state="normal",
         )
         self._connect_status.configure(
             text="Direct P2P channel established", text_color=GREEN,
@@ -593,6 +598,31 @@ class App(ctk.CTk):
                 text="Select a file to send to your peer", text_color=TEXT_DIM,
             )
         self._status_label.configure(text="Connected - ready to transfer files")
+
+    def _on_peer_disconnected(self) -> None:
+        """Called (on main thread) when the peer connection is closed or failed."""
+        self.connected = False
+        self._conn_dot.configure(text_color=ORANGE)
+        self._conn_label.configure(text="Online", text_color=ORANGE)
+        self._connect_btn.configure(
+            text="Connect", fg_color=GREEN_DIM, state="normal",
+        )
+        self._connect_status.configure(
+            text="Connection closed", text_color=TEXT_DIM,
+        )
+        self._send_btn.configure(state="disabled")
+        self._send_hint.configure(
+            text="Connect to a peer first, then select a file to send",
+            text_color=TEXT_DIM,
+        )
+        self._status_label.configure(text="Disconnected from peer")
+
+    async def _disconnect_async(self) -> None:
+        """Perform background disconnection."""
+        if self.peer:
+            await self.peer.close()
+        # Reconnect signalling to be ready for next connection
+        await self._init_async()
 
     def _set_status(self, text: str, color: str = TEXT_DIM) -> None:
         self._status_label.configure(text=text, text_color=color)
@@ -634,6 +664,9 @@ class App(ctk.CTk):
             self.peer.on_message(self._handle_message)
             self.peer.on_data_channel_ready(
                 lambda: self.after(0, self._on_peer_connected)
+            )
+            self.peer.on_connection_closed(
+                lambda: self.after(0, self._on_peer_disconnected)
             )
 
             self.after(0, self._conn_dot.configure, {"text_color": ORANGE})
@@ -824,9 +857,40 @@ class App(ctk.CTk):
                 self._send_done.set()
 
     async def _handle_manifest(self, manifest: Manifest) -> None:
-        """Start receiving a file."""
+        """Start receiving a file, asking user for confirmation first."""
         logger.info("Incoming file: %s (%d bytes)",
                     manifest.filename, manifest.file_size)
+
+        # Prompt user on main thread
+        approved_event = asyncio.Event()
+        approved = False
+
+        def ask_user():
+            nonlocal approved
+            from tkinter import messagebox
+            res = messagebox.askyesno(
+                "Incoming File Transfer",
+                f"Your peer wants to send you a file:\n\n"
+                f"Filename: {manifest.filename}\n"
+                f"Size: {_fmt_size(manifest.file_size)}\n\n"
+                f"Do you want to accept this transfer?"
+            )
+            approved = res
+            self._bridge.loop.call_soon_threadsafe(approved_event.set)
+
+        self.after(0, ask_user)
+        await approved_event.wait()
+
+        if not approved:
+            logger.info("User declined the file transfer")
+            nack = NackMessage(
+                transfer_id=manifest.transfer_id,
+                chunk_index=-1,
+                reason="Decline",
+            )
+            self.peer.send(serialize(nack))
+            return
+
         self._receiver = FileReceiver(manifest, self._download_dir)
         self._recv_transfer_id = manifest.transfer_id
         self._recv_start_time = time.time()
