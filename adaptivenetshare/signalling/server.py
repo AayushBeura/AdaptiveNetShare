@@ -54,6 +54,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     if target in _peers:
                         data["source"] = peer_id
                         await _peers[target].send_json(data)
+                        logger.info("Forwarded %s from %s -> %s", msg_type, peer_id, target)
                     else:
                         await ws.send_json({"type": "error", "message": f"Peer {target} not found"})
                         
