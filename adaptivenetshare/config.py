@@ -18,23 +18,16 @@ SIGNALLING_URL: str = os.environ.get(
 )
 
 # ---------------------------------------------------------------------------
-# ICE / STUN / TURN — Open Relay Project (free, no signup)
-# https://www.metered.ca/tools/openrelay/
+# ICE / STUN / TURN
 # ---------------------------------------------------------------------------
 STUN_URLS: list[str] = [
     "stun:stun.l.google.com:19302",
     "stun:stun1.l.google.com:19302",
-    "stun:openrelay.metered.ca:80",
 ]
 
-TURN_URLS: list[str] = [
-    "turn:openrelay.metered.ca:80",
-    "turn:openrelay.metered.ca:443",
-    "turn:openrelay.metered.ca:443?transport=tcp",
-]
-
-TURN_USERNAME: str = "openrelayproject"
-TURN_CREDENTIAL: str = "openrelayproject"
+TURN_URLS: list[str] = []
+TURN_USERNAME: str = ""
+TURN_CREDENTIAL: str = ""
 
 # ---------------------------------------------------------------------------
 # File transfer

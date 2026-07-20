@@ -45,16 +45,16 @@ ChannelReadyCallback = Callable[[], Awaitable[None] | None]
 
 def _build_ice_config() -> RTCConfiguration:
     """Build the RTCConfiguration with Open Relay STUN/TURN servers."""
-    return RTCConfiguration(
-        iceServers=[
-            RTCIceServer(urls=STUN_URLS),
+    ice_servers = [RTCIceServer(urls=STUN_URLS)]
+    if TURN_URLS:
+        ice_servers.append(
             RTCIceServer(
                 urls=TURN_URLS,
                 username=TURN_USERNAME,
                 credential=TURN_CREDENTIAL,
-            ),
-        ]
-    )
+            )
+        )
+    return RTCConfiguration(iceServers=ice_servers)
 
 
 class Peer:
@@ -349,8 +349,8 @@ class Peer:
                 done.set()
 
         try:
-            # Most gathering completes in <500ms. We set a 3s timeout to be safe.
-            await asyncio.wait_for(done.wait(), timeout=3.0)
+            # Wait up to 10s for ICE gathering to complete to ensure STUN is collected
+            await asyncio.wait_for(done.wait(), timeout=10.0)
             logger.info("ICE gathering complete")
         except asyncio.TimeoutError:
             logger.warning("ICE gathering timed out, sending partial SDP")
