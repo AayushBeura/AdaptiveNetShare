@@ -687,9 +687,6 @@ class App(ctk.CTk):
             self.peer.on_connection_closed(
                 lambda: self.after(0, self._on_peer_disconnected)
             )
-            self.peer.on_connection_failed(
-                lambda err: self.after(0, self._connect_status.configure, {"text": err, "text_color": RED})
-            )
 
             self.after(0, self._conn_dot.configure, {"text_color": ORANGE})
             self.after(0, self._conn_label.configure,

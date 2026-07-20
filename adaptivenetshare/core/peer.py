@@ -99,7 +99,6 @@ class Peer:
         self._on_channel_ready: ChannelReadyCallback | None = None
         self._on_connection_closed: Callable[[], None] | None = None
         self._on_connection_request: Callable[[str], None] | None = None
-        self._on_connection_failed: Callable[[str], None] | None = None
 
         # Events and Futures
         self.channel_ready = asyncio.Event()
@@ -124,12 +123,8 @@ class Peer:
         self._on_connection_closed = callback
 
     def on_connection_request(self, callback: Callable[[str], None]) -> None:
-        """Register a callback when a peer requests a connection."""
+        """Register a callback for incoming connection requests."""
         self._on_connection_request = callback
-
-    def on_connection_failed(self, callback: Callable[[str], None]) -> None:
-        """Register a callback when the WebRTC connection fails (e.g. NAT traversal error)."""
-        self._on_connection_failed = callback
 
     # ------------------------------------------------------------------ #
     # Signalling
@@ -367,14 +362,6 @@ class Peer:
     def _setup_pc_events(self) -> None:
         """Wire up events on the RTCPeerConnection."""
         assert self._pc is not None
-        
-        @self._pc.on("iceconnectionstatechange")
-        def on_iceconnectionstatechange():
-            logger.info("ICE connection state changed to %s", self._pc.iceConnectionState)
-            if self._pc.iceConnectionState == "failed":
-                logger.error("WebRTC ICE connection failed. Symmetric NAT blocking?")
-                if self._on_connection_failed:
-                    self._on_connection_failed("Failed to connect due to strict network NAT/firewalls. A TURN server is required.")
 
         @self._pc.on("datachannel")
         def on_datachannel(channel):
