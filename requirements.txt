@@ -1,0 +1,13 @@
+# AdaptiveNetShare — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# --- Week 1: Core Engine ---
+aiortc>=1.9.0            # Python WebRTC: ICE, STUN/TURN, data channels
+websockets>=13.0         # Signalling server and client
+aiofiles>=24.1.0         # Async file I/O for chunk reads/writes
+msgpack>=1.0.8           # Efficient binary serialization for protocol messages
+
+# --- Week 2: Features ---
+# zeroconf>=0.132.0      # mDNS LAN peer discovery
+customtkinter>=5.2.0     # Desktop UI
+# cryptography>=43.0.0   # Ed25519 keypair generation (security)

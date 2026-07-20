@@ -1,0 +1,324 @@
+"""
+WebRTC peer connection manager.
+
+Handles the full lifecycle of a peer-to-peer connection:
+  1. Connect to the signalling server via WebSocket.
+  2. Exchange SDP offers / answers and ICE candidates.
+  3. Open a WebRTC data channel for file transfer.
+
+Uses aiortc for the WebRTC implementation and the signalling server
+from ``adaptivenetshare.signalling.server`` for rendezvous.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import uuid
+from typing import Callable, Optional, Awaitable
+
+from aiortc import (
+    RTCPeerConnection,
+    RTCConfiguration,
+    RTCIceServer,
+    RTCSessionDescription,
+    RTCIceCandidate,
+)
+from websockets.asyncio.client import connect as ws_connect
+
+from adaptivenetshare.config import (
+    SIGNALLING_URL,
+    STUN_URLS,
+    TURN_URLS,
+    TURN_USERNAME,
+    TURN_CREDENTIAL,
+    DATA_CHANNEL_LABEL,
+)
+
+logger = logging.getLogger(__name__)
+
+# Type alias for message callbacks
+MessageCallback = Callable[[bytes | str], Awaitable[None] | None]
+ChannelReadyCallback = Callable[[], Awaitable[None] | None]
+
+
+def _build_ice_config() -> RTCConfiguration:
+    """Build the RTCConfiguration with Open Relay STUN/TURN servers."""
+    return RTCConfiguration(
+        iceServers=[
+            RTCIceServer(urls=STUN_URLS),
+            RTCIceServer(
+                urls=TURN_URLS,
+                username=TURN_USERNAME,
+                credential=TURN_CREDENTIAL,
+            ),
+        ]
+    )
+
+
+class Peer:
+    """
+    Manages a single WebRTC peer connection with signalling.
+
+    Usage (offerer)::
+
+        peer = Peer()
+        await peer.connect_signalling()
+        peer.on_data_channel_ready(my_ready_handler)
+        peer.on_message(my_message_handler)
+        await peer.create_offer(target_peer_id)
+        # ... data channel opens, callbacks fire ...
+        await peer.close()
+
+    Usage (answerer)::
+
+        peer = Peer()
+        await peer.connect_signalling()
+        peer.on_data_channel_ready(my_ready_handler)
+        peer.on_message(my_message_handler)
+        # ... answerer waits; signalling loop handles incoming offer ...
+        await peer.close()
+    """
+
+    def __init__(
+        self,
+        peer_id: str | None = None,
+        signalling_url: str = SIGNALLING_URL,
+    ) -> None:
+        self.peer_id = peer_id or str(uuid.uuid4())
+        self.signalling_url = signalling_url
+
+        self._ws = None                         # WebSocket to signalling server
+        self._pc: RTCPeerConnection | None = None
+        self._channel = None                    # RTCDataChannel (offerer creates)
+        self._signalling_task: asyncio.Task | None = None
+
+        # User-registered callbacks
+        self._on_message: MessageCallback | None = None
+        self._on_channel_ready: ChannelReadyCallback | None = None
+
+        # Event fired when the data channel is open and usable
+        self.channel_ready = asyncio.Event()
+
+    # ------------------------------------------------------------------ #
+    # Callback registration
+    # ------------------------------------------------------------------ #
+
+    def on_message(self, callback: MessageCallback) -> None:
+        """Register a callback for incoming data-channel messages."""
+        self._on_message = callback
+
+    def on_data_channel_ready(self, callback: ChannelReadyCallback) -> None:
+        """Register a callback for when the data channel opens."""
+        self._on_channel_ready = callback
+
+    # ------------------------------------------------------------------ #
+    # Signalling
+    # ------------------------------------------------------------------ #
+
+    async def connect_signalling(self) -> None:
+        """Open a WebSocket to the signalling server and register this peer."""
+        self._ws = await ws_connect(self.signalling_url)
+        await self._ws.send(json.dumps({
+            "type": "register",
+            "peer_id": self.peer_id,
+        }))
+
+        # Read registration acknowledgement
+        ack = json.loads(await self._ws.recv())
+        if ack.get("type") != "registered":
+            raise RuntimeError(f"Registration failed: {ack}")
+
+        logger.info("Registered with signalling server as %s", self.peer_id)
+
+        # Start background task to process incoming signalling messages
+        self._signalling_task = asyncio.create_task(self._signalling_loop())
+
+    async def _signalling_loop(self) -> None:
+        """Process incoming signalling messages (offers, answers, candidates)."""
+        assert self._ws is not None
+        try:
+            async for raw in self._ws:
+                msg = json.loads(raw)
+                msg_type = msg.get("type")
+
+                if msg_type == "offer":
+                    await self._handle_offer(msg)
+                elif msg_type == "answer":
+                    await self._handle_answer(msg)
+                elif msg_type == "candidate":
+                    await self._handle_candidate(msg)
+                elif msg_type == "error":
+                    logger.error("Signalling error: %s", msg.get("message"))
+                else:
+                    logger.warning("Unknown signalling message: %s", msg_type)
+        except Exception:
+            logger.exception("Signalling loop error")
+
+    # ------------------------------------------------------------------ #
+    # Offer / Answer
+    # ------------------------------------------------------------------ #
+
+    async def create_offer(self, target_id: str) -> None:
+        """
+        Create a WebRTC offer to connect to *target_id*.
+
+        This side becomes the offerer and creates the data channel.
+        """
+        if target_id == self.peer_id:
+            raise ValueError("Cannot connect to yourself")
+
+        self._pc = RTCPeerConnection(configuration=_build_ice_config())
+        self._setup_pc_events()
+
+        # The offerer creates the data channel
+        self._channel = self._pc.createDataChannel(DATA_CHANNEL_LABEL)
+        self._setup_channel_events(self._channel)
+
+        # Create and set local SDP offer
+        offer = await self._pc.createOffer()
+        await self._pc.setLocalDescription(offer)
+
+        # Send offer through signalling server
+        assert self._ws is not None
+        await self._ws.send(json.dumps({
+            "type": "offer",
+            "target": target_id,
+            "sdp": {
+                "type": self._pc.localDescription.type,
+                "sdp": self._pc.localDescription.sdp,
+            },
+        }))
+        logger.info("Sent SDP offer to %s", target_id)
+
+    async def _handle_offer(self, msg: dict) -> None:
+        """Handle an incoming SDP offer from another peer."""
+        source_id = msg.get("source", "unknown")
+        logger.info("Received SDP offer from %s", source_id)
+
+        self._pc = RTCPeerConnection(configuration=_build_ice_config())
+        self._setup_pc_events()
+
+        # Set remote description from the offer
+        sdp_data = msg["sdp"]
+        offer = RTCSessionDescription(sdp=sdp_data["sdp"], type=sdp_data["type"])
+        await self._pc.setRemoteDescription(offer)
+
+        # Create and set the answer
+        answer = await self._pc.createAnswer()
+        await self._pc.setLocalDescription(answer)
+
+        # Send answer back through signalling server
+        assert self._ws is not None
+        await self._ws.send(json.dumps({
+            "type": "answer",
+            "target": source_id,
+            "sdp": {
+                "type": self._pc.localDescription.type,
+                "sdp": self._pc.localDescription.sdp,
+            },
+        }))
+        logger.info("Sent SDP answer to %s", source_id)
+
+    async def _handle_answer(self, msg: dict) -> None:
+        """Handle an incoming SDP answer."""
+        if self._pc is None:
+            logger.warning("Received answer but no PeerConnection exists")
+            return
+
+        sdp_data = msg["sdp"]
+        answer = RTCSessionDescription(sdp=sdp_data["sdp"], type=sdp_data["type"])
+        await self._pc.setRemoteDescription(answer)
+        logger.info("Set remote description from answer")
+
+    async def _handle_candidate(self, msg: dict) -> None:
+        """Handle an incoming ICE candidate."""
+        if self._pc is None:
+            logger.warning("Received ICE candidate but no PeerConnection exists")
+            return
+
+        candidate_data = msg.get("candidate")
+        if candidate_data:
+            candidate = RTCIceCandidate(
+                sdpMid=candidate_data.get("sdpMid"),
+                sdpMLineIndex=candidate_data.get("sdpMLineIndex"),
+                candidate=candidate_data.get("candidate", ""),
+            )
+            await self._pc.addIceCandidate(candidate)
+            logger.debug("Added ICE candidate")
+
+    # ------------------------------------------------------------------ #
+    # PeerConnection and DataChannel event wiring
+    # ------------------------------------------------------------------ #
+
+    def _setup_pc_events(self) -> None:
+        """Wire up events on the RTCPeerConnection."""
+        assert self._pc is not None
+
+        @self._pc.on("datachannel")
+        def on_datachannel(channel):
+            """Answerer receives the data channel here."""
+            logger.info("Data channel received: %s", channel.label)
+            self._channel = channel
+            self._setup_channel_events(channel)
+
+        @self._pc.on("connectionstatechange")
+        async def on_connection_state_change():
+            state = self._pc.connectionState
+            logger.info("Connection state: %s", state)
+            if state == "failed":
+                await self.close()
+
+    def _setup_channel_events(self, channel) -> None:
+        """Wire up events on the data channel."""
+
+        @channel.on("open")
+        def on_open():
+            logger.info("Data channel OPEN: %s", channel.label)
+            self.channel_ready.set()
+            if self._on_channel_ready is not None:
+                result = self._on_channel_ready()
+                if asyncio.iscoroutine(result):
+                    asyncio.ensure_future(result)
+
+        @channel.on("message")
+        def on_message(message):
+            if self._on_message is not None:
+                result = self._on_message(message)
+                if asyncio.iscoroutine(result):
+                    asyncio.ensure_future(result)
+
+        @channel.on("close")
+        def on_close():
+            logger.info("Data channel CLOSED")
+
+    # ------------------------------------------------------------------ #
+    # Sending
+    # ------------------------------------------------------------------ #
+
+    def send(self, data: bytes | str) -> None:
+        """Send data over the open data channel."""
+        if self._channel is None:
+            raise RuntimeError("Data channel not open yet")
+        self._channel.send(data)
+
+    # ------------------------------------------------------------------ #
+    # Teardown
+    # ------------------------------------------------------------------ #
+
+    async def close(self) -> None:
+        """Tear down the peer connection and signalling WebSocket."""
+        if self._signalling_task is not None:
+            self._signalling_task.cancel()
+            self._signalling_task = None
+
+        if self._pc is not None:
+            await self._pc.close()
+            self._pc = None
+
+        if self._ws is not None:
+            await self._ws.close()
+            self._ws = None
+
+        logger.info("Peer %s closed", self.peer_id)
