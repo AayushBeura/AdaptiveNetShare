@@ -120,8 +120,22 @@ class Peer:
     # ------------------------------------------------------------------ #
 
     async def connect_signalling(self) -> None:
-        """Open a WebSocket to the signalling server and register this peer."""
-        self._ws = await ws_connect(self.signalling_url)
+        """Connect to the WebSocket signalling server and register."""
+        for attempt in range(3):
+            try:
+                # Render free tier might take ~50s to wake up, so use a longer timeout or retry
+                self._ws = await ws_connect(
+                    self.signalling_url, open_timeout=60.0
+                )
+                break
+            except Exception as e:
+                if attempt == 2:
+                    logger.error("Failed to connect to signalling server after 3 attempts.")
+                    raise
+                logger.warning(f"Signalling connection attempt {attempt+1} failed: {e}. Retrying in 2s...")
+                await asyncio.sleep(2)
+
+        # Register
         await self._ws.send(json.dumps({
             "type": "register",
             "peer_id": self.peer_id,
