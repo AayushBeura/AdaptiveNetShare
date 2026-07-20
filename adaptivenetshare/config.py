@@ -14,7 +14,7 @@ from pathlib import Path
 SIGNALLING_HOST: str = "0.0.0.0"
 SIGNALLING_PORT: int = int(os.environ.get("PORT", "8765"))
 SIGNALLING_URL: str = os.environ.get(
-    "ANS_SIGNALLING_URL", f"ws://localhost:{SIGNALLING_PORT}"
+    "ANS_SIGNALLING_URL", "wss://adaptivenetshare-signalling.onrender.com"
 )
 
 # ---------------------------------------------------------------------------
