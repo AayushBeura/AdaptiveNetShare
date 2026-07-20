@@ -98,11 +98,13 @@ class Peer:
         self._on_message: MessageCallback | None = None
         self._on_channel_ready: ChannelReadyCallback | None = None
         self._on_connection_closed: Callable[[], None] | None = None
+        self._on_connection_request: Callable[[str], None] | None = None
 
-        # Events
+        # Events and Futures
         self.channel_ready = asyncio.Event()
         self.buffer_low = asyncio.Event()
         self.buffer_low.set()  # Initially low
+        self._connection_request_futures: dict[str, asyncio.Future] = {}
 
     # ------------------------------------------------------------------ #
     # Callback registration
@@ -119,6 +121,10 @@ class Peer:
     def on_connection_closed(self, callback: Callable[[], None]) -> None:
         """Register a callback for when the connection closes."""
         self._on_connection_closed = callback
+
+    def on_connection_request(self, callback: Callable[[str], None]) -> None:
+        """Register a callback for incoming connection requests."""
+        self._on_connection_request = callback
 
     # ------------------------------------------------------------------ #
     # Signalling
@@ -170,8 +176,26 @@ class Peer:
                     await self._handle_answer(msg)
                 elif msg_type == "candidate":
                     await self._handle_candidate(msg)
+                elif msg_type == "connection_request":
+                    source_id = msg.get("source")
+                    if source_id and self._on_connection_request:
+                        self._on_connection_request(source_id)
+                elif msg_type == "connection_accepted":
+                    source_id = msg.get("source")
+                    if source_id in self._connection_request_futures:
+                        self._connection_request_futures[source_id].set_result(True)
+                elif msg_type == "connection_rejected":
+                    source_id = msg.get("source")
+                    if source_id in self._connection_request_futures:
+                        self._connection_request_futures[source_id].set_result(False)
                 elif msg_type == "error":
-                    logger.error("Signalling error: %s", msg.get("message"))
+                    error_msg = msg.get("message", "")
+                    logger.error("Signalling error: %s", error_msg)
+                    if "not found" in error_msg:
+                        # Fail pending requests
+                        for f in self._connection_request_futures.values():
+                            if not f.done():
+                                f.set_exception(RuntimeError(error_msg))
                 else:
                     logger.warning("Unknown signalling message: %s", msg_type)
         except Exception:
@@ -180,6 +204,42 @@ class Peer:
     # ------------------------------------------------------------------ #
     # Offer / Answer
     # ------------------------------------------------------------------ #
+
+    async def request_connection(self, target_id: str) -> bool:
+        """Request a connection with the target peer. Returns True if accepted."""
+        if target_id == self.peer_id:
+            raise ValueError("Cannot connect to yourself")
+
+        assert self._ws is not None
+        fut = asyncio.get_running_loop().create_future()
+        self._connection_request_futures[target_id] = fut
+
+        await self._ws.send(json.dumps({
+            "type": "connection_request",
+            "target": target_id,
+        }))
+        logger.info("Sent connection request to %s", target_id)
+
+        try:
+            return await asyncio.wait_for(fut, timeout=30.0)
+        finally:
+            self._connection_request_futures.pop(target_id, None)
+
+    async def accept_connection(self, target_id: str) -> None:
+        """Accept an incoming connection request."""
+        if self._ws is not None:
+            await self._ws.send(json.dumps({
+                "type": "connection_accepted",
+                "target": target_id,
+            }))
+
+    async def reject_connection(self, target_id: str) -> None:
+        """Reject an incoming connection request."""
+        if self._ws is not None:
+            await self._ws.send(json.dumps({
+                "type": "connection_rejected",
+                "target": target_id,
+            }))
 
     async def create_offer(self, target_id: str) -> None:
         """
@@ -308,12 +368,21 @@ class Peer:
             logger.info("Data channel received: %s", channel.label)
             self._channel = channel
             self._setup_channel_events(channel)
+            
+            # aiortc may not fire 'open' if it is already open when the event is attached
+            if channel.readyState == "open":
+                channel.bufferedAmountLowThreshold = 1024 * 1024
+                self.channel_ready.set()
+                if self._on_channel_ready is not None:
+                    result = self._on_channel_ready()
+                    if asyncio.iscoroutine(result):
+                        asyncio.ensure_future(result)
 
         @self._pc.on("connectionstatechange")
         async def on_connection_state_change():
             state = self._pc.connectionState
             logger.info("Connection state: %s", state)
-            if state in ("failed", "closed"):
+            if state in ("failed", "closed", "disconnected"):
                 await self.close()
                 if self._on_connection_closed is not None:
                     self._on_connection_closed()

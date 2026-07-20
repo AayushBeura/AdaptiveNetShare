@@ -70,9 +70,9 @@ async def _handler(ws: ServerConnection) -> None:
                 }))
 
             # ----------------------------------------------------------
-            # OFFER / ANSWER / CANDIDATE — forward to the target peer
+            # OFFER / ANSWER / CANDIDATE / HANDSHAKE — forward to the target peer
             # ----------------------------------------------------------
-            elif msg_type in ("offer", "answer", "candidate"):
+            elif msg_type in ("offer", "answer", "candidate", "connection_request", "connection_accepted", "connection_rejected"):
                 target_id = msg.get("target")
                 if not target_id:
                     await ws.send(json.dumps({

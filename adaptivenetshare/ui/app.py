@@ -163,6 +163,7 @@ class App(ctk.CTk):
         self._send_manifest_ack: Optional[asyncio.Future[bool]] = None
         self._send_ack_queue: Optional[asyncio.Queue] = None
         self._send_done: Optional[asyncio.Event] = None
+        self._current_send_future = None
 
         # Receive-side state
         self._receiver: Optional[FileReceiver] = None
@@ -577,7 +578,7 @@ class App(ctk.CTk):
             return
         self._send_btn.configure(state="disabled", text="Sending...")
         self._send_hint.configure(text="Transfer in progress...", text_color=CYAN)
-        self._bridge.submit(self._send_file_async(self.selected_file))
+        self._current_send_future = self._bridge.submit(self._send_file_async(self.selected_file))
 
     def _on_peer_connected(self) -> None:
         """Called (on main thread) when the data channel opens."""
@@ -616,6 +617,17 @@ class App(ctk.CTk):
             text_color=TEXT_DIM,
         )
         self._status_label.configure(text="Disconnected from peer")
+        
+        # Cancel any active sends
+        if self._current_send_future:
+            self._current_send_future.cancel()
+            self._current_send_future = None
+            
+        # Fail any active receives
+        if self._recv_transfer_id:
+            self._fail_transfer_widget(self._recv_transfer_id, "Connection closed")
+            self._recv_transfer_id = None
+            self._receiver = None
 
     async def _disconnect_async(self) -> None:
         """Perform background disconnection."""
@@ -660,6 +672,7 @@ class App(ctk.CTk):
 
             # Register callbacks
             self.peer.on_message(self._handle_message)
+            self.peer.on_connection_request(self._handle_connection_request)
             self.peer.on_data_channel_ready(
                 lambda: self.after(0, self._on_peer_connected)
             )
@@ -681,11 +694,44 @@ class App(ctk.CTk):
             self.after(0, self._conn_label.configure,
                        {"text": "Offline", "text_color": RED})
 
+    def _handle_connection_request(self, target_id: str) -> None:
+        """Handle incoming connection request from a peer."""
+        def ask_user():
+            from tkinter import messagebox
+            res = messagebox.askyesno(
+                "Incoming Connection",
+                f"Peer {target_id} wants to connect with you.\n\nAccept connection?"
+            )
+            if res:
+                if self.peer:
+                    self._bridge.submit(self.peer.accept_connection(target_id))
+                    # Auto-fill the peer ID so receiver can easily send back
+                    self._peer_entry.delete(0, "end")
+                    self._peer_entry.insert(0, target_id)
+                    self._connect_status.configure(
+                        text="Establishing WebRTC connection...", text_color=ORANGE
+                    )
+            else:
+                if self.peer:
+                    self._bridge.submit(self.peer.reject_connection(target_id))
+
+        self.after(0, ask_user)
+
     async def _connect_to_peer_async(self, target_id: str) -> None:
         """Create a WebRTC offer to the target peer."""
         try:
             if self.peer is None:
                 raise RuntimeError("Not connected to signalling server")
+
+            self.after(0, self._connect_status.configure,
+                       {"text": "Requesting connection...", "text_color": ORANGE})
+            
+            accepted = await self.peer.request_connection(target_id)
+            if not accepted:
+                raise RuntimeError("Connection request declined by peer")
+
+            self.after(0, self._connect_status.configure,
+                       {"text": "Establishing WebRTC connection...", "text_color": ORANGE})
 
             await self.peer.create_offer(target_id)
             logger.info("Sent offer to %s", target_id)
@@ -793,6 +839,13 @@ class App(ctk.CTk):
                        transfer_id, f"Sent {_fmt_size(manifest.file_size)}")
             self.after(0, self._send_hint.configure,
                        {"text": "Transfer complete!", "text_color": GREEN})
+
+        except asyncio.CancelledError:
+            logger.warning("Send cancelled due to disconnect")
+            if transfer_id:
+                self.after(0, self._fail_transfer_widget, transfer_id, "Connection closed")
+            self.after(0, self._send_hint.configure,
+                       {"text": "Send failed: Connection closed", "text_color": RED})
 
         except Exception as e:
             logger.exception("Send failed")
