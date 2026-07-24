@@ -11,18 +11,24 @@ from __future__ import annotations
 import math
 import os
 import uuid
+import zlib
 import logging
 from pathlib import Path
 from typing import Set
 
 from adaptivenetshare.config import CHUNK_SIZE, DEFAULT_DOWNLOAD_DIR
-from adaptivenetshare.core.integrity import hash_bytes, hash_file
+from adaptivenetshare.core.integrity import hash_file
 from adaptivenetshare.core.messages import (
     Manifest,
     ChunkMessage,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _crc32(data: bytes) -> str:
+    """Fast CRC32 checksum as 8-char hex string."""
+    return format(zlib.crc32(data) & 0xFFFFFFFF, '08x')
 
 
 class FileSender:
@@ -45,6 +51,18 @@ class FileSender:
 
         # Compute whole-file hash (streams, constant memory)
         self.file_sha256 = hash_file(self.path)
+
+        # Keep file handle open for fast sequential reads
+        self._fh = open(self.path, "rb")
+        self._last_read_pos = 0
+
+    def close(self) -> None:
+        """Close the file handle."""
+        if self._fh and not self._fh.closed:
+            self._fh.close()
+
+    def __del__(self):
+        self.close()
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -73,17 +91,39 @@ class FileSender:
             )
 
         offset = index * self.chunk_size
-        with open(self.path, "rb") as f:
-            f.seek(offset)
-            data = f.read(self.chunk_size)
+        # Only seek if not already at the right position (sequential read optimization)
+        if self._last_read_pos != offset:
+            self._fh.seek(offset)
+        data = self._fh.read(self.chunk_size)
+        self._last_read_pos = offset + len(data)
 
         return ChunkMessage(
             transfer_id=self.transfer_id,
             chunk_index=index,
             total_chunks=self.total_chunks,
-            sha256=hash_bytes(data),
+            sha256=_crc32(data),  # CRC32 for per-chunk (fast), whole-file SHA-256 is separate
             data=data,
         )
+
+    def get_chunks_batch(self, start: int, count: int) -> list[ChunkMessage]:
+        """Read a batch of sequential chunks efficiently."""
+        end = min(start + count, self.total_chunks)
+        chunks = []
+        offset = start * self.chunk_size
+        if self._last_read_pos != offset:
+            self._fh.seek(offset)
+        for idx in range(start, end):
+            data = self._fh.read(self.chunk_size)
+            self._last_read_pos = offset + len(data)
+            offset += len(data)
+            chunks.append(ChunkMessage(
+                transfer_id=self.transfer_id,
+                chunk_index=idx,
+                total_chunks=self.total_chunks,
+                sha256=_crc32(data),
+                data=data,
+            ))
+        return chunks
 
 
 class FileReceiver:
@@ -105,8 +145,8 @@ class FileReceiver:
         )
 
         # Pre-allocate the temp file so we can write chunks at arbitrary offsets
-        with open(self._temp_path, "wb") as f:
-            f.truncate(manifest.file_size)
+        self._fh = open(self._temp_path, "w+b")
+        self._fh.truncate(manifest.file_size)
 
         self._received: Set[int] = set()
 
@@ -125,8 +165,8 @@ class FileReceiver:
 
         Returns True (ACK) on success, False (NACK) on hash mismatch.
         """
-        # Verify per-chunk hash
-        actual_hash = hash_bytes(chunk.data)
+        # Verify per-chunk hash (CRC32 — very fast)
+        actual_hash = _crc32(chunk.data)
         if actual_hash != chunk.sha256:
             logger.warning(
                 "Chunk %d hash mismatch: expected %s, got %s",
@@ -136,15 +176,10 @@ class FileReceiver:
 
         # Write to the correct offset in the temp file
         offset = chunk.chunk_index * self.manifest.chunk_size
-        with open(self._temp_path, "r+b") as f:
-            f.seek(offset)
-            f.write(chunk.data)
+        self._fh.seek(offset)
+        self._fh.write(chunk.data)
 
         self._received.add(chunk.chunk_index)
-        logger.debug(
-            "Chunk %d/%d received OK",
-            chunk.chunk_index + 1, self.manifest.total_chunks,
-        )
         return True
 
     @property
@@ -169,6 +204,10 @@ class FileReceiver:
                 f"Cannot finalize: still missing {missing} chunks"
             )
 
+        # Flush and close the file handle
+        self._fh.flush()
+        self._fh.close()
+
         # Handle name collision by appending a counter
         final_path = self._final_path
         if final_path.exists():
@@ -185,6 +224,8 @@ class FileReceiver:
 
     def cleanup(self) -> None:
         """Remove the temp file (e.g. on cancellation)."""
+        if hasattr(self, '_fh') and self._fh and not self._fh.closed:
+            self._fh.close()
         if self._temp_path.exists():
             self._temp_path.unlink()
             logger.info("Cleaned up temp file: %s", self._temp_path)

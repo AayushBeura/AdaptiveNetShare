@@ -391,14 +391,30 @@ class Peer:
                     if asyncio.iscoroutine(result):
                         asyncio.ensure_future(result)
 
+        @self._pc.on("iceconnectionstatechange")
+        def on_ice_connection_state_change():
+            if self._pc:
+                logger.info("ICE connection state: %s", self._pc.iceConnectionState)
+
         @self._pc.on("connectionstatechange")
         async def on_connection_state_change():
+            if self._pc is None:
+                return
             state = self._pc.connectionState
             logger.info("Connection state: %s", state)
-            if state in ("failed", "closed", "disconnected"):
-                await self.close()
+            if state == "failed":
+                # ICE negotiation genuinely failed — close the peer connection
+                # but keep the signalling WebSocket alive so user can retry.
+                logger.error("WebRTC connection failed (ICE could not connect)")
+                await self.disconnect_peer()
+            elif state == "closed":
+                # PeerConnection was explicitly closed.
                 if self._on_connection_closed is not None:
                     self._on_connection_closed()
+            elif state == "disconnected":
+                # Temporary state — the connection may recover on its own.
+                # Do NOT tear anything down here.
+                logger.warning("Connection temporarily disconnected, waiting for recovery...")
 
     def _setup_channel_events(self, channel) -> None:
         """Wire up events on the data channel."""
