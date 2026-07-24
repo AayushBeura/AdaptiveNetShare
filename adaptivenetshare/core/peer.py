@@ -384,7 +384,7 @@ class Peer:
             
             # aiortc may not fire 'open' if it is already open when the event is attached
             if channel.readyState == "open":
-                channel.bufferedAmountLowThreshold = 1024 * 1024
+                channel.bufferedAmountLowThreshold = 2 * 1024 * 1024  # 2MB
                 self.channel_ready.set()
                 if self._on_channel_ready is not None:
                     result = self._on_channel_ready()
@@ -422,8 +422,8 @@ class Peer:
         @channel.on("open")
         def on_open():
             logger.info("Data channel OPEN: %s", channel.label)
-            # Set buffer threshold (e.g. 1MB)
-            channel.bufferedAmountLowThreshold = 1024 * 1024
+            # Set buffer threshold for backpressure
+            channel.bufferedAmountLowThreshold = 2 * 1024 * 1024  # 2MB
             self.channel_ready.set()
             if self._on_channel_ready is not None:
                 result = self._on_channel_ready()
@@ -462,8 +462,10 @@ class Peer:
         if self._channel is None:
             raise RuntimeError("Data channel not open yet")
         
-        # If buffer is full, wait until it drains below threshold
-        if self._channel.bufferedAmount > self._channel.bufferedAmountLowThreshold:
+        # Allow up to 8MB in the SCTP outbound buffer before blocking.
+        # When it drains below bufferedAmountLowThreshold (2MB), resume.
+        MAX_BUFFER = 8 * 1024 * 1024
+        if self._channel.bufferedAmount > MAX_BUFFER:
             self.buffer_low.clear()
             await self.buffer_low.wait()
             
