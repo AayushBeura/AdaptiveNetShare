@@ -33,9 +33,9 @@ METERED_API_URL: str = os.environ.get(
 # ---------------------------------------------------------------------------
 # File transfer
 # ---------------------------------------------------------------------------
-CHUNK_SIZE: int = 65_536          # 64 KB per chunk
+CHUNK_SIZE: int = 262_144          # 256 KB per chunk (larger = fewer round-trips)
 DATA_CHANNEL_LABEL: str = "file-transfer"
-SLIDING_WINDOW_SIZE: int = 8      # chunks sent ahead without waiting for ACK
+SLIDING_WINDOW_SIZE: int = 64      # chunks sent ahead without waiting for ACK
 
 # ---------------------------------------------------------------------------
 # Paths
